@@ -21,12 +21,18 @@ console.log('✅ Environment variables validated')
 console.log('Bot token:', process.env.TELEGRAM_BOT_TOKEN.slice(0, 5) + '...')
 
 let bot = null
-let isShuttingDown = false
+let retryCount = 0
+const MAX_RETRIES = 3
 
-function startBot() {
+async function startBot() {
+	if (retryCount >= MAX_RETRIES) {
+		console.error('❌ Max retries reached, shutting down')
+		process.exit(1)
+	}
+
 	if (bot) {
 		try {
-			bot.stopPolling()
+			await bot.stopPolling()
 		} catch (e) {
 			console.log('Error stopping bot:', e)
 		}
@@ -35,45 +41,41 @@ function startBot() {
 	try {
 		bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
 			polling: true,
-			timeout: 60,
+			timeout: 30,
 			limit: 100,
 			retryAfter: 5000
 		})
-		console.log('✅ Bot instance created successfully')
+		console.log('✅ Bot instance created')
+		retryCount = 0
 	} catch (e) {
 		console.error('❌ Failed to create bot instance:', e)
 		process.exit(1)
 	}
+
+	bot.on('polling_error', async error => {
+		console.log('Polling error:', error.code)
+		if (
+			error.code === 'ETELEGRAM' &&
+			error.message.includes('terminated by other getUpdates request')
+		) {
+			console.log('⚠️ Conflict detected, waiting and retrying...')
+			retryCount++
+			await new Promise(resolve => setTimeout(resolve, 5000))
+			startBot()
+		}
+	})
 
 	// Create temp directory if it doesn't exist
 	if (!fs.existsSync('./temp')) {
 		fs.mkdirSync('./temp')
 	}
 
-	bot.on('polling_error', error => {
-		console.log('Polling error:', error)
-		if (
-			error.code === 'ETELEGRAM' &&
-			error.message.includes('terminated by other getUpdates request')
-		) {
-			if (!isShuttingDown) {
-				console.log('Restarting bot due to polling conflict...')
-				setTimeout(startBot, 10000) // Restart after 10 seconds
-			}
-		}
-	})
-
 	async function downloadVideo(url) {
-		try {
-			const videoPath = `./temp/${Date.now()}.mp4`
-			console.log('Downloading video from:', url)
-			await execPromise(`yt-dlp -o "${videoPath}" ${url}`)
-			console.log('✅ Video downloaded successfully')
-			return videoPath
-		} catch (error) {
-			console.error('❌ Error downloading video:', error)
-			throw new Error(`Failed to download video: ${error.message}`)
-		}
+		const videoPath = `./temp/${Date.now()}.mp4`
+		console.log('Downloading video from:', url)
+		await execPromise(`yt-dlp -o "${videoPath}" ${url}`)
+		console.log('✅ Video downloaded successfully')
+		return videoPath
 	}
 
 	bot.on('message', async msg => {
@@ -126,20 +128,18 @@ function startBot() {
 }
 
 // Handle graceful shutdown
-process.on('SIGTERM', () => {
-	isShuttingDown = true
+process.on('SIGTERM', async () => {
 	console.log('SIGTERM received. Shutting down gracefully...')
 	if (bot) {
-		bot.stopPolling()
+		await bot.stopPolling()
 	}
 	process.exit(0)
 })
 
-process.on('SIGINT', () => {
-	isShuttingDown = true
+process.on('SIGINT', async () => {
 	console.log('SIGINT received. Shutting down gracefully...')
 	if (bot) {
-		bot.stopPolling()
+		await bot.stopPolling()
 	}
 	process.exit(0)
 })
