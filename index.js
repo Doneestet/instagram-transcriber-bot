@@ -24,15 +24,27 @@ let bot = null
 let retryCount = 0
 const MAX_RETRIES = 3
 
-async function killExistingWebhooks() {
+async function cleanupBot() {
 	try {
 		const tempBot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
 			polling: false
 		})
-		await tempBot.deleteWebhook({ drop_pending_updates: true })
-		console.log('✅ Existing webhooks cleaned up')
+
+		// Get webhook info
+		const webhookInfo = await tempBot.getWebhookInfo()
+		console.log('Current webhook:', webhookInfo)
+
+		if (webhookInfo.url) {
+			// Remove webhook
+			await tempBot._request('deleteWebhook', { drop_pending_updates: true })
+			console.log('✅ Webhook removed')
+		}
+
+		// Get updates to clear queue
+		await tempBot.getUpdates({ offset: -1, limit: 1 })
+		console.log('✅ Update queue cleared')
 	} catch (e) {
-		console.log('Error cleaning webhooks:', e.message)
+		console.log('Error during cleanup:', e.message)
 	}
 }
 
@@ -52,40 +64,52 @@ async function startBot() {
 		}
 	}
 
-	// Kill any existing webhooks
-	await killExistingWebhooks()
+	// Cleanup existing connections
+	await cleanupBot()
 	await new Promise(resolve => setTimeout(resolve, 2000))
 
 	try {
 		bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-			polling: {
-				interval: 300,
-				autoStart: true,
-				params: {
-					timeout: 10
+			polling: true,
+			filepath: false,
+			baseApiUrl: 'https://api.telegram.org',
+			options: {
+				polling: {
+					timeout: 10,
+					limit: 100,
+					allowedUpdates: ['message'],
+					params: {
+						timeout: 10
+					}
 				}
 			}
 		})
+
 		console.log('✅ Bot instance created')
 		retryCount = 0
 
 		// Setup error handlers
 		bot.on('polling_error', async error => {
-			console.log('Polling error:', error.code)
+			console.log('Polling error:', error.message)
 			if (
 				error.code === 'ETELEGRAM' &&
 				error.message.includes('terminated by other getUpdates request')
 			) {
 				console.log('⚠️ Conflict detected, waiting and retrying...')
 				retryCount++
-				await bot.stopPolling()
-				await new Promise(resolve => setTimeout(resolve, 5000))
-				await startBot()
+				try {
+					await bot.stopPolling()
+					await cleanupBot()
+					await new Promise(resolve => setTimeout(resolve, 5000))
+					await startBot()
+				} catch (e) {
+					console.log('Error during retry:', e.message)
+				}
 			}
 		})
 
 		bot.on('error', error => {
-			console.log('Bot error:', error.code)
+			console.log('Bot error:', error.message)
 		})
 
 		// Create temp directory if it doesn't exist
@@ -160,7 +184,7 @@ process.on('SIGTERM', async () => {
 	console.log('SIGTERM received. Shutting down gracefully...')
 	if (bot) {
 		await bot.stopPolling()
-		await killExistingWebhooks()
+		await cleanupBot()
 	}
 	process.exit(0)
 })
@@ -169,7 +193,7 @@ process.on('SIGINT', async () => {
 	console.log('SIGINT received. Shutting down gracefully...')
 	if (bot) {
 		await bot.stopPolling()
-		await killExistingWebhooks()
+		await cleanupBot()
 	}
 	process.exit(0)
 })
