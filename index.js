@@ -6,6 +6,20 @@ const OpenAI = require('openai')
 const util = require('util')
 const execPromise = util.promisify(exec)
 
+// Validate environment variables
+if (!process.env.TELEGRAM_BOT_TOKEN) {
+	console.error('❌ TELEGRAM_BOT_TOKEN is not set in environment variables')
+	process.exit(1)
+}
+
+if (!process.env.OPENAI_API_KEY) {
+	console.error('❌ OPENAI_API_KEY is not set in environment variables')
+	process.exit(1)
+}
+
+console.log('✅ Environment variables validated')
+console.log('Bot token:', process.env.TELEGRAM_BOT_TOKEN.slice(0, 5) + '...')
+
 let bot = null
 let isShuttingDown = false
 
@@ -18,12 +32,18 @@ function startBot() {
 		}
 	}
 
-	bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-		polling: true,
-		timeout: 60,
-		limit: 100,
-		retryAfter: 5000
-	})
+	try {
+		bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+			polling: true,
+			timeout: 60,
+			limit: 100,
+			retryAfter: 5000
+		})
+		console.log('✅ Bot instance created successfully')
+	} catch (e) {
+		console.error('❌ Failed to create bot instance:', e)
+		process.exit(1)
+	}
 
 	// Create temp directory if it doesn't exist
 	if (!fs.existsSync('./temp')) {
@@ -117,5 +137,6 @@ process.on('SIGINT', () => {
 })
 
 // Start the bot
+console.log('Starting bot...')
 startBot()
 console.log('Bot is running...')
