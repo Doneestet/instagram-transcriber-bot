@@ -1,5 +1,6 @@
 require('dotenv').config()
 const TelegramBot = require('node-telegram-bot-api')
+const express = require('express')
 const { exec } = require('child_process')
 const fs = require('fs')
 const OpenAI = require('openai')
@@ -20,154 +21,31 @@ if (!process.env.OPENAI_API_KEY) {
 console.log('✅ Environment variables validated')
 console.log('Bot token:', process.env.TELEGRAM_BOT_TOKEN.slice(0, 5) + '...')
 
+const app = express()
+app.use(express.json())
+
+const PORT = process.env.PORT || 3000
 let bot = null
-let retryCount = 0
-const MAX_RETRIES = 3
 
-async function cleanupBot() {
+async function setupBot() {
 	try {
-		const tempBot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-			polling: false
-		})
+		// Create bot instance without polling
+		bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false })
 
-		// Get webhook info
-		const webhookInfo = await tempBot.getWebhookInfo()
-		console.log('Current webhook:', webhookInfo)
-
-		if (webhookInfo.url) {
-			// Remove webhook
-			await tempBot._request('deleteWebhook', { drop_pending_updates: true })
-			console.log('✅ Webhook removed')
-		}
-
-		// Get updates to clear queue
-		await tempBot.getUpdates({ offset: -1, limit: 1 })
-		console.log('✅ Update queue cleared')
-	} catch (e) {
-		console.log('Error during cleanup:', e.message)
-	}
-}
-
-async function startBot() {
-	if (retryCount >= MAX_RETRIES) {
-		console.error('❌ Max retries reached, shutting down')
-		process.exit(1)
-	}
-
-	// Try to cleanup any existing connections
-	if (bot) {
-		try {
-			await bot.stopPolling()
-			await new Promise(resolve => setTimeout(resolve, 2000))
-		} catch (e) {
-			console.log('Error stopping bot:', e)
-		}
-	}
-
-	// Cleanup existing connections
-	await cleanupBot()
-	await new Promise(resolve => setTimeout(resolve, 2000))
-
-	try {
-		bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-			polling: true,
-			filepath: false,
-			baseApiUrl: 'https://api.telegram.org',
-			options: {
-				polling: {
-					timeout: 10,
-					limit: 100,
-					allowedUpdates: ['message'],
-					params: {
-						timeout: 10
-					}
-				}
-			}
-		})
-
-		console.log('✅ Bot instance created')
-		retryCount = 0
-
-		// Setup error handlers
-		bot.on('polling_error', async error => {
-			console.log('Polling error:', error.message)
-			if (
-				error.code === 'ETELEGRAM' &&
-				error.message.includes('terminated by other getUpdates request')
-			) {
-				console.log('⚠️ Conflict detected, waiting and retrying...')
-				retryCount++
-				try {
-					await bot.stopPolling()
-					await cleanupBot()
-					await new Promise(resolve => setTimeout(resolve, 5000))
-					await startBot()
-				} catch (e) {
-					console.log('Error during retry:', e.message)
-				}
-			}
-		})
-
-		bot.on('error', error => {
-			console.log('Bot error:', error.message)
-		})
+		// Set webhook URL (Render provides RENDER_EXTERNAL_URL)
+		const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook/${process.env.TELEGRAM_BOT_TOKEN}`
+		await bot.setWebHook(webhookUrl)
+		console.log('✅ Webhook set to:', webhookUrl)
 
 		// Create temp directory if it doesn't exist
 		if (!fs.existsSync('./temp')) {
 			fs.mkdirSync('./temp')
 		}
 
-		// Setup message handler
-		bot.on('message', async msg => {
-			const chatId = msg.chat.id
-			const text = msg.text
-
-			if (!text) return
-
-			if (text.includes('instagram.com')) {
-				try {
-					// Send processing message
-					const processingMsg = await bot.sendMessage(
-						chatId,
-						'🎵 Processing video...'
-					)
-
-					// Download video using yt-dlp
-					const videoPath = await downloadVideo(text)
-
-					await bot.editMessageText('🎯 Video downloaded, transcribing...', {
-						chat_id: chatId,
-						message_id: processingMsg.message_id
-					})
-
-					// Transcribe video
-					const openai = new OpenAI({
-						apiKey: process.env.OPENAI_API_KEY
-					})
-
-					const transcription = await openai.audio.transcriptions.create({
-						file: fs.createReadStream(videoPath),
-						model: 'whisper-1'
-					})
-
-					// Send transcription
-					await bot.editMessageText(transcription.text, {
-						chat_id: chatId,
-						message_id: processingMsg.message_id
-					})
-
-					// Clean up
-					fs.unlinkSync(videoPath)
-					console.log('✅ Video processed and transcribed successfully')
-				} catch (error) {
-					console.error('Error:', error)
-					bot.sendMessage(chatId, '❌ Error processing video: ' + error.message)
-				}
-			}
-		})
+		return bot
 	} catch (e) {
-		console.error('❌ Failed to create bot instance:', e)
-		process.exit(1)
+		console.error('❌ Failed to setup bot:', e)
+		throw e
 	}
 }
 
@@ -179,26 +57,94 @@ async function downloadVideo(url) {
 	return videoPath
 }
 
+// Setup webhook endpoint
+app.post(`/webhook/${process.env.TELEGRAM_BOT_TOKEN}`, async (req, res) => {
+	try {
+		const { message } = req.body
+
+		if (!message || !message.text) {
+			return res.sendStatus(200)
+		}
+
+		const chatId = message.chat.id
+		const text = message.text
+
+		if (text.includes('instagram.com')) {
+			try {
+				// Send processing message
+				const processingMsg = await bot.sendMessage(
+					chatId,
+					'🎵 Processing video...'
+				)
+
+				// Download video using yt-dlp
+				const videoPath = await downloadVideo(text)
+
+				await bot.editMessageText('🎯 Video downloaded, transcribing...', {
+					chat_id: chatId,
+					message_id: processingMsg.message_id
+				})
+
+				// Transcribe video
+				const openai = new OpenAI({
+					apiKey: process.env.OPENAI_API_KEY
+				})
+
+				const transcription = await openai.audio.transcriptions.create({
+					file: fs.createReadStream(videoPath),
+					model: 'whisper-1'
+				})
+
+				// Send transcription
+				await bot.editMessageText(transcription.text, {
+					chat_id: chatId,
+					message_id: processingMsg.message_id
+				})
+
+				// Clean up
+				fs.unlinkSync(videoPath)
+				console.log('✅ Video processed and transcribed successfully')
+			} catch (error) {
+				console.error('Error:', error)
+				bot.sendMessage(chatId, '❌ Error processing video: ' + error.message)
+			}
+		}
+
+		res.sendStatus(200)
+	} catch (error) {
+		console.error('Webhook error:', error)
+		res.sendStatus(500)
+	}
+})
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+	res.status(200).json({ status: 'ok' })
+})
+
+// Start server and setup bot
+async function start() {
+	try {
+		await setupBot()
+		app.listen(PORT, () => {
+			console.log(`🚀 Server is running on port ${PORT}`)
+		})
+	} catch (error) {
+		console.error('Failed to start server:', error)
+		process.exit(1)
+	}
+}
+
 // Handle graceful shutdown
-process.on('SIGTERM', async () => {
+process.on('SIGTERM', () => {
 	console.log('SIGTERM received. Shutting down gracefully...')
-	if (bot) {
-		await bot.stopPolling()
-		await cleanupBot()
-	}
 	process.exit(0)
 })
 
-process.on('SIGINT', async () => {
+process.on('SIGINT', () => {
 	console.log('SIGINT received. Shutting down gracefully...')
-	if (bot) {
-		await bot.stopPolling()
-		await cleanupBot()
-	}
 	process.exit(0)
 })
 
-// Start the bot
-console.log('Starting bot...')
-startBot()
-console.log('Bot is running...')
+// Start the application
+start()
