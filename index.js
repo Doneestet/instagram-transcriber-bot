@@ -64,9 +64,16 @@ function startBot() {
 	})
 
 	async function downloadVideo(url) {
-		const videoPath = `./temp/${Date.now()}.mp4`
-		await execPromise(`yt-dlp -o "${videoPath}" ${url}`)
-		return videoPath
+		try {
+			const videoPath = `./temp/${Date.now()}.mp4`
+			console.log('Downloading video from:', url)
+			await execPromise(`yt-dlp -o "${videoPath}" ${url}`)
+			console.log('✅ Video downloaded successfully')
+			return videoPath
+		} catch (error) {
+			console.error('❌ Error downloading video:', error)
+			throw new Error(`Failed to download video: ${error.message}`)
+		}
 	}
 
 	bot.on('message', async msg => {
@@ -109,6 +116,7 @@ function startBot() {
 
 				// Clean up
 				fs.unlinkSync(videoPath)
+				console.log('✅ Video processed and transcribed successfully')
 			} catch (error) {
 				console.error('Error:', error)
 				bot.sendMessage(chatId, '❌ Error processing video: ' + error.message)
